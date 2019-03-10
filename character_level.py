@@ -123,5 +123,140 @@ class CharacterRNN(nn.Module):
              
     return hidden
 
+#TRAINING
+def train(net,data,epochs=10,batch_size=10,seq_length=60,lr=.001,clip=5,val_frac=.1,print_every=10):
+  
+  net.train()
+  
+  optimizer = torch.optim.Adam(net.parameters(),lr=lr)
+  criterion = nn.CrossEntropyLoss()
+  
+  val_idx = int(len(data)*(1-val_frac))
+  data,val_data = data[:val_idx],data[val_idx:]
+  
+  net.cuda()
+  counter=0
+  n_chars=len(net.chars)
+  for e in range(epochs):
+    
+    h = net.init_hidden(batch_size)
+    
+    for x,y in get_batches(data,batch_size,seq_length):
+        counter+=1
+        
+        x = one_hot_encoder(x,n_chars)
+        inputs , target = torch.from_numpy(x).cuda(),torch.from_numpy(y).cuda()
+        
+        h = tuple([each.data for each in h])
+        
+        net.zero_grad()
+        
+        output,h = net(inputs,h)
+        
+        loss = criterion(output,target.view(batch_size*seq_length).long())
+        loss.backward()
+        
+        nn.utils.clip_grad_norm_(net.parameters(),clip)
+        optimizer.step()
+        
+        if counter % print_every ==0:
+          val_h = net.init_hidden(batch_size)
+          val_losses = []
+          net.eval()
+          
+          for x,y in get_batches(val_data,batch_size,seq_length):
+            #print("hello")
+            
+            x=one_hot_encoder(x,n_chars)
+            inputs, target = torch.from_numpy(x).cuda(), torch.from_numpy(y).cuda()
 
+            val_h = tuple([each.data for each in val_h])
+
+            #inputs, target = x,y 
+
+            output,val_h = net(inputs,val_h)
+            val_loss = criterion(output, target.view(batch_size*seq_length).long())
+            #print("************",val_loss.items(),"*************")    
+            val_losses.append(val_loss.item())
+
+
+          net.train()
+          print("Epoch: {}/{}...".format(e+1, epochs),
+          "Step: {}...".format(counter),
+          "Loss: {:.4f}...".format(loss.item()),
+          "Val Loss: {:.4f}".format(np.mean(val_losses)))
+
+# define and print the net
+n_hidden=512
+n_layers=2
+
+net = CharacterRNN(chars, n_hidden, n_layers)
+net.cuda()
+print(net)
+
+batch_size = 128 
+seq_length = 100 
+n_epochs = 15 
+
+train(net,encoded,epochs=n_epochs,batch_size=batch_size,seq_length=seq_length,lr=.001,print_every=10)
+
+os.chdir('models')
+
+checkpoint = {
+    'n_hidden':net.n_hidden,
+    'n_layers':net.n_layers,
+    'state_dict': net.state_dict(),
+    'tokens':net.chars
+}
+
+with open("charRNN","wb") as f:
+  torch.save(checkpoint,f)
+
+with open("charRNN",'rb') as f:
+  checkpoint = torch.load(f)
+
+loaded=CharacterRNN(checkpoint['tokens'],n_hidden=checkpoint['n_hidden'],n_layers=checkpoint['n_layers'])
+loaded.load_state_dict(checkpoint['state_dict'])
+
+def predict(net,char,h=None,top_k=None):
+  
+  x = np.array([[net.char2int[char]]])
+  x= one_hot_encoder(x,len(net.chars))
+  inputs = torch.from_numpy(x).cuda()
+  
+  h = tuple([each.data for each in h])
+  out, h = net(inputs,h)
+  
+  p = F.softmax(out,dim=1).data
+  p=p.cpu()
+  
+  if top_k is None:
+    top_ch = np.arange(len(net.chars))
+  else:
+    p, top_ch = p.topk(top_k)
+    top_ch = top_ch.numpy().squeeze()
+    
+  p = p.numpy().squeeze()
+  char = np.random.choice(top_ch,p=p/p.sum())
+  
+  return net.int2char[char],h
+
+def sample(net,size,prime='The',top_k=None):
+    
+    net.cuda()
+    net.eval()
+    chars = [ch for ch in prime]
+    h = net.init_hidden(1) #one character at a time hence batch size 1
+    for ch in prime:
+      char, h = predict(net,ch,h,top_k=top_k)
+      
+    chars.append(char)
+    
+    for ii in range(size):
+      char, h = predict(net,chars[-1],h,top_k=top_k)
+      chars.append(char)
+     
+    return ''.join(chars)
+
+print(sample(loaded,50,prime="L",top_k=5))
 
